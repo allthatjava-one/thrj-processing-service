@@ -1,0 +1,5 @@
+.venv
+.venv*/
+.wrangler/
+.env
+.dev.vars
