@@ -2,6 +2,7 @@ name = "api-gateway"
 main = "src/main.py"
 compatibility_date = "2024-12-18"
 compatibility_flags = ["python_workers"]
+port = 8788
 
 # Set ALLOWED_ORIGINS as an environment variable in the Cloudflare dashboard
 # (Workers & Pages → your worker → Settings → Variables and Secrets)

@@ -14,4 +14,9 @@ uv run pywrangler init
 
 '''
 
+# Start the app in local
+```
+wrangler dev --port 8788
+```
+
 # Dummy commit

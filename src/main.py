@@ -4,11 +4,8 @@ POST /api/v1/pdf-compressor
 """
 from workers import WorkerEntrypoint, Response
 
-import hashlib
-import hmac
 import json
-from datetime import datetime, timezone
-from urllib.parse import quote, urlparse
+from urllib.parse import urlparse
 from js import Object, Response, fetch as js_fetch
 from pyodide.ffi import to_js
 
@@ -56,94 +53,7 @@ def _handle_preflight(request, allowed_origins: list) -> Response:
     return resp
 
 
-def _extract_base_filename(object_key: str) -> str:
-    """Return the filename stem (no extension) from an R2 object key."""
-    last = object_key.rstrip("/").split("/")[-1]
-    if last.lower().endswith(".pdf"):
-        return last[:-4]
-    if "." in last:
-        return last.rsplit(".", 1)[0]
-    return last or "file"
-
-
-# ---------------------------------------------------------------------------
-# AWS SigV4 helpers (used to authenticate requests to R2 S3-compatible API)
-# ---------------------------------------------------------------------------
-
-def _hmac_sha256(key: bytes, msg: str) -> bytes:
-    return hmac.new(key, msg.encode("utf-8"), hashlib.sha256).digest()
-
-
-def _build_r2_auth_headers(
-    object_key: str,
-    endpoint_host: str,
-    access_key_id: str,
-    secret_access_key: str,
-    bucket_name: str,
-) -> dict:
-    region = "auto"
-    service = "s3"
-    host = endpoint_host
-
-    now = datetime.now(timezone.utc)
-    amz_date = now.strftime("%Y%m%dT%H%M%SZ")
-    date_stamp = now.strftime("%Y%m%d")
-
-    # URI-encode each path segment of the key
-    encoded_key = "/".join(quote(seg, safe="") for seg in object_key.split("/"))
-    canonical_uri = f"/{bucket_name}/{encoded_key}"
-
-    payload_hash = hashlib.sha256(b"").hexdigest()
-    canonical_headers = (
-        f"host:{host}\n"
-        f"x-amz-content-sha256:{payload_hash}\n"
-        f"x-amz-date:{amz_date}\n"
-    )
-    signed_headers = "host;x-amz-content-sha256;x-amz-date"
-
-    canonical_request = "\n".join([
-        "GET",
-        canonical_uri,
-        "",  # no query string
-        canonical_headers,
-        signed_headers,
-        payload_hash,
-    ])
-
-    credential_scope = f"{date_stamp}/{region}/{service}/aws4_request"
-    string_to_sign = "\n".join([
-        "AWS4-HMAC-SHA256",
-        amz_date,
-        credential_scope,
-        hashlib.sha256(canonical_request.encode("utf-8")).hexdigest(),
-    ])
-
-    signing_key = _hmac_sha256(
-        _hmac_sha256(
-            _hmac_sha256(
-                _hmac_sha256(
-                    ("AWS4" + secret_access_key).encode("utf-8"),
-                    date_stamp,
-                ),
-                region,
-            ),
-            service,
-        ),
-        "aws4_request",
-    )
-    signature = hmac.new(signing_key, string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
-
-    authorization = (
-        f"AWS4-HMAC-SHA256 Credential={access_key_id}/{credential_scope}, "
-        f"SignedHeaders={signed_headers}, Signature={signature}"
-    )
-
-    return {
-        "Host": host,
-        "x-amz-date": amz_date,
-        "x-amz-content-sha256": payload_hash,
-        "Authorization": authorization,
-    }
+# (R2 access removed) Use external compress service instead
 
 
 # ---------------------------------------------------------------------------
@@ -170,51 +80,44 @@ async def _handle_pdf_compressor(request, env, origin: str) -> Response:
 
     if not isinstance(object_key, str):
         return _error(400, "object_key must be a string.", origin)
-
-    # Derive output filename
-    base_name = _extract_base_filename(object_key)
-    compressed_filename = f"{base_name}-compress.pdf"
-
-    # Read R2 credentials from environment variables
-    endpoint_url = env.R2_ENDPOINT_URL.rstrip("/")   # e.g. https://<account>.r2.cloudflarestorage.com
-    endpoint_host = urlparse(endpoint_url).netloc
-    access_key_id = env.R2_ACCESS_KEY_ID
-    secret_access_key = env.R2_SECRET_ACCESS_KEY
-    bucket_name = env.R2_BUCKET_NAME
-
-    url = f"{endpoint_url}/{bucket_name}/{object_key}"
-
-    headers = _build_r2_auth_headers(
-        object_key, endpoint_host, access_key_id, secret_access_key, bucket_name
-    )
-
-    print(f"[pdf-compressor] fetching R2 object: {object_key}")
+    # Call external compress service which returns a presigned key
+    # external_url = "http://localhost:8787/compress"
+    external_url = env.SERVICE_PDF_COMPRESS_URL
+    print(f"[pdf-compressor] calling external compress service for: {object_key}")
     try:
-        file_response = await js_fetch(
-            url,
-            to_js({"method": "GET", "headers": headers}, dict_converter=Object.fromEntries),
+        ext_resp = await js_fetch(
+            external_url,
+            to_js(
+                {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"objectKey": object_key}),
+                },
+                dict_converter=Object.fromEntries,
+            ),
         )
     except Exception as exc:
-        print(f"[pdf-compressor] fetch exception: {exc}")
-        return _error(502, f"Failed to fetch file: {exc}", origin)
+        print(f"[pdf-compressor] external fetch exception: {exc}")
+        return _error(502, f"Failed to call compress service: {exc}", origin)
 
-    print(f"[pdf-compressor] R2 response status: {file_response.status}")
-    if not file_response.ok:
-        body_text = await file_response.text()
-        print(f"[pdf-compressor] R2 error body: {body_text[:200]}")
-        return _error(502, f"R2 returned {file_response.status}: {body_text[:200]}", origin)
+    print(f"[pdf-compressor] external response status: {ext_resp.status}")
+    if not ext_resp.ok:
+        body_text = await ext_resp.text()
+        print(f"[pdf-compressor] external error body: {body_text[:200]}")
+        return _error(502, f"Compress service returned {ext_resp.status}: {body_text[:200]}", origin)
 
-    # Stream bytes back to caller with the renamed filename
-    array_buffer = await file_response.arrayBuffer()
-    resp = Response.new(array_buffer, {"status": 200})
-    resp.headers.set("Content-Type", "application/pdf")
-    resp.headers.set(
-        "Content-Disposition",
-        f'attachment; filename="{compressed_filename}"',
-    )
-    if origin:
-        _set_cors_headers(resp, origin)
-    return resp
+    try:
+        result_text = await ext_resp.text()
+        result = json.loads(result_text)
+    except Exception as exc:
+        print(f"[pdf-compressor] invalid json from compress service: {exc}")
+        return _error(502, "Compress service returned invalid JSON.", origin)
+
+    presigned = result.get("presignedUrl")
+    if not presigned:
+        return _error(502, "Compress service did not return presignedUrl.", origin)
+
+    return _json_response({"presignedUrl": presigned}, 200, origin)
 
 
 # ---------------------------------------------------------------------------
