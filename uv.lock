@@ -196,7 +196,7 @@ wheels = [
 ]
 
 [[package]]
-name = "thrj-processor-service"
+name = "api-gateway"
 version = "0.1.0"
 source = { virtual = "." }
 

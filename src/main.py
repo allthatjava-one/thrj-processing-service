@@ -1,5 +1,5 @@
 """
-thrj-processor-service — Cloudflare Python Worker
+api-gateway — Cloudflare Python Worker
 POST /api/v1/pdf-compressor
 """
 from workers import WorkerEntrypoint, Response

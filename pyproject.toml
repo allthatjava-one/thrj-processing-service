@@ -2,7 +2,7 @@
 package = false
 
 [project]
-name = "thrj-processor-service"
+name = "api-gateway"
 version = "0.1.0"
 description = "Cloudflare Python Worker"
 requires-python = ">=3.12"
