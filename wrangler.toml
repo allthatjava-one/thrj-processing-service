@@ -3,9 +3,10 @@ main = "src/main.py"
 compatibility_date = "2024-12-18"
 compatibility_flags = ["python_workers"]
 
-# Uncomment and configure to bind secrets or KV namespaces as needed
-# [vars]
-# MY_VAR = "value"
+# Set ALLOWED_ORIGINS as an environment variable in the Cloudflare dashboard
+# (Workers & Pages → your worker → Settings → Variables and Secrets)
+# or via CLI: wrangler secret put ALLOWED_ORIGINS
+# Value format: comma-separated origins, e.g. "http://localhost:4173,https://pdf-compressor.thrjtech.com"
 
 # R2 credentials — set these via: wrangler secret put <NAME>
 # Required secrets:

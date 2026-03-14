@@ -13,13 +13,10 @@ from js import Object, Response, fetch as js_fetch
 from pyodide.ffi import to_js
 
 # ---------------------------------------------------------------------------
-# Allowed origins — update these with your actual frontend URLs before deploy
+# Allowed origins are loaded from the ALLOWED_ORIGINS environment variable.
+# Set it as a comma-separated string in wrangler.toml [vars] or via secret:
+#   ALLOWED_ORIGINS = "http://localhost:4173,https://pdf-compressor.thrjtech.com"
 # ---------------------------------------------------------------------------
-ALLOWED_ORIGINS = [
-    "http://localhost:5173",
-    "https://app.yourdomain.com",
-    # Add or remove origins as needed
-]
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -46,9 +43,9 @@ def _error(status: int, message: str, origin: str = "") -> Response:
     return _json_response({"error": message}, status, origin)
 
 
-def _handle_preflight(request) -> Response:
+def _handle_preflight(request, allowed_origins: list) -> Response:
     origin = request.headers.get("Origin") or ""
-    if origin not in ALLOWED_ORIGINS:
+    if origin not in allowed_origins:
         return Response.new("Forbidden", {"status": 403})
     resp = Response.new("", {"status": 204})
     resp.headers.set("Access-Control-Allow-Origin", origin)
@@ -228,13 +225,16 @@ class Default(WorkerEntrypoint):
         env = self.env
         method = request.method.upper()
 
+        raw = getattr(env, "ALLOWED_ORIGINS", "") or ""
+        allowed_origins = [o.strip() for o in raw.split(",") if o.strip()]
+
         # CORS preflight
         if method == "OPTIONS":
-            return _handle_preflight(request)
+            return _handle_preflight(request, allowed_origins)
 
         # Origin check — all non-preflight requests must come from an allowed origin
         origin = request.headers.get("Origin") or ""
-        if origin not in ALLOWED_ORIGINS:
+        if origin not in allowed_origins:
             return _error(403, "Forbidden: Origin not allowed.")
 
         path = urlparse(str(request.url)).path.rstrip("/")
