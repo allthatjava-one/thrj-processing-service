@@ -1,6 +1,7 @@
 """
 api-gateway — Cloudflare Python Worker
 POST /api/v1/pdf-compressor
+POST /api/v1/pdf-merger
 """
 from workers import WorkerEntrypoint, Response
 
@@ -25,6 +26,7 @@ TRANSIENT_STATUS_CODES = {408, 425, 429, 500, 502, 503, 504}
 MAX_COMPRESS_WAIT_SECONDS = 90
 DEFAULT_INITIAL_RETRY_DELAY_SECONDS = 1
 DEFAULT_COMPRESSED_PDF_FETCH_TIMEOUT_SECONDS = 30
+DEFAULT_MERGED_PDF_FETCH_TIMEOUT_SECONDS = 30
 MAX_RETRY_DELAY_SECONDS = 5
 
 def _set_cors_headers(resp, origin: str):
@@ -209,6 +211,89 @@ async def _handle_pdf_compressor(request, env, origin: str) -> Response:
     return _json_response({"presignedUrl": presigned}, 200, origin)
 
 
+async def _handle_pdf_merger(request, env, origin: str) -> Response:
+    # Parse body
+    try:
+        body = await request.json()
+    except Exception:
+        return _error(400, "Request body must be valid JSON.", origin)
+
+    if not isinstance(body, dict):
+        return _error(400, "Request body must be a JSON object.", origin)
+
+    object_keys = body.get("objectKeys")
+    if object_keys is None:
+        object_keys = body.get("object_keys")
+
+    if object_keys is None:
+        return _error(400, "Missing required field: objectKeys.", origin)
+
+    if not isinstance(object_keys, list) or not object_keys:
+        return _error(400, "objectKeys must be a non-empty array.", origin)
+
+    if any(not isinstance(item, str) or not item.strip() for item in object_keys):
+        return _error(400, "objectKeys must contain non-empty strings.", origin)
+
+    print(f"[pdf-merger] received objectKeys: {object_keys}")
+
+    merge_url = getattr(env, "SERVICE_PDF_MERGE_URL", None)
+    if not merge_url:
+        return _error(500, "Missing required environment variable: SERVICE_PDF_MERGE_URL.", origin)
+
+    merged_pdf_fetch_timeout_seconds = DEFAULT_MERGED_PDF_FETCH_TIMEOUT_SECONDS
+    fetch_timeout_raw = getattr(env, "MERGED_PDF_FETCH_TIMEOUT_SECONDS", None)
+    if fetch_timeout_raw is not None:
+        try:
+            configured_timeout = float(fetch_timeout_raw)
+            if configured_timeout > 0:
+                merged_pdf_fetch_timeout_seconds = configured_timeout
+        except (TypeError, ValueError):
+            print(
+                "[pdf-merger] invalid MERGED_PDF_FETCH_TIMEOUT_SECONDS; using default"
+            )
+
+    print(f"[pdf-merger] calling external merge service for {len(object_keys)} files")
+    try:
+        ext_resp = await asyncio.wait_for(
+            js_fetch(
+                merge_url,
+                to_js(
+                    {
+                        "method": "POST",
+                        "headers": {"Content-Type": "application/json"},
+                        "body": json.dumps({"objectKeys": object_keys}),
+                    },
+                    dict_converter=Object.fromEntries,
+                ),
+            ),
+            timeout=merged_pdf_fetch_timeout_seconds,
+        )
+    except asyncio.TimeoutError:
+        return _error(
+            504,
+            f"Merge service request timed out after {merged_pdf_fetch_timeout_seconds}s.",
+            origin,
+        )
+    except Exception as exc:
+        return _error(502, f"Failed to call merge service: {exc}", origin)
+
+    if not ext_resp.ok:
+        body_text = await ext_resp.text()
+        return _error(502, f"Merge service returned {ext_resp.status}: {body_text[:200]}", origin)
+
+    try:
+        result_text = await ext_resp.text()
+        result = json.loads(result_text)
+    except Exception:
+        return _error(502, "Merge service returned invalid JSON.", origin)
+
+    presigned = result.get("presignedUrl")
+    if not presigned:
+        return _error(502, "Merge service did not return presignedUrl.", origin)
+
+    return _json_response({"presignedUrl": presigned}, 200, origin)
+
+
 # ---------------------------------------------------------------------------
 # Cloudflare Workers entry point
 # ---------------------------------------------------------------------------
@@ -239,6 +324,11 @@ class Default(WorkerEntrypoint):
         if path == "/api/v1/pdf-compressor":
             if method == "POST":
                 return await _handle_pdf_compressor(request, env, origin)
+            return _error(405, "Method Not Allowed: use POST.", origin)
+
+        if path == "/api/v1/pdf-merger":
+            if method == "POST":
+                return await _handle_pdf_merger(request, env, origin)
             return _error(405, "Method Not Allowed: use POST.", origin)
 
         return _error(404, "Not Found.", origin)
