@@ -19,4 +19,9 @@ uv run pywrangler init
 wrangler dev --port 8788
 ```
 
-# Dummy commit
+# Deploy to Cloudflare Pages
+Keep all variables as secret type
+```
+> Deploy command:npx wrangler deploy --keep-vars
+> Put Non-production branch deployment command as : npx wrangler versions upload
+```
