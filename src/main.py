@@ -211,6 +211,86 @@ async def _handle_pdf_compressor(request, env, origin: str) -> Response:
     return _json_response({"presignedUrl": presigned}, 200, origin)
 
 
+
+async def _call_merge_service_with_retry(
+    merge_url: str,
+    object_keys: list,
+    merged_pdf_fetch_timeout_seconds: float,
+):
+    deadline = time.monotonic() + MAX_COMPRESS_WAIT_SECONDS
+    attempt = 0
+    retry_delay = DEFAULT_INITIAL_RETRY_DELAY_SECONDS
+    last_error = "Merge service did not become ready in time."
+
+    while time.monotonic() < deadline:
+        attempt += 1
+        ext_resp, fetch_error = await _fetch_merge_with_timeout(
+            merge_url,
+            object_keys,
+            merged_pdf_fetch_timeout_seconds,
+        )
+        if ext_resp is None:
+            last_error = fetch_error
+
+        if ext_resp is not None:
+            if ext_resp.ok:
+                return ext_resp, ""
+
+            body_text = await ext_resp.text()
+            if ext_resp.status not in TRANSIENT_STATUS_CODES:
+                return None, f"Merge service returned {ext_resp.status}: {body_text[:200]}"
+
+            last_error = (
+                f"Merge service temporary failure ({ext_resp.status}): {body_text[:200]}"
+            )
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+
+        sleep_for = min(retry_delay, remaining)
+        print(
+            f"[pdf-merger] attempt {attempt} failed, retrying in {sleep_for:.1f}s"
+        )
+        await asyncio.sleep(sleep_for)
+        retry_delay = min(retry_delay * 2, MAX_RETRY_DELAY_SECONDS)
+
+    return None, last_error
+
+
+async def _fetch_merge_with_timeout(
+    merge_url: str,
+    object_keys: list,
+    merged_pdf_fetch_timeout_seconds: float,
+):
+    controller = AbortController.new()
+    timeout_ms = max(1, int(merged_pdf_fetch_timeout_seconds * 1000))
+    timeout_id = setTimeout(controller.abort, timeout_ms)
+
+    try:
+        ext_resp = await js_fetch(
+            merge_url,
+            to_js(
+                {
+                    "method": "POST",
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"objectKeys": object_keys}),
+                    "signal": controller.signal,
+                },
+                dict_converter=Object.fromEntries,
+            ),
+        )
+        return ext_resp, ""
+    except Exception as exc:
+        error_name = getattr(exc, "name", "")
+        error_text = str(exc)
+        if error_name == "AbortError" or "AbortError" in error_text:
+            return None, f"Merge service request timed out after {merged_pdf_fetch_timeout_seconds}s."
+        return None, f"Failed to call merge service: {exc}"
+    finally:
+        clearTimeout(timeout_id)
+
+
 async def _handle_pdf_merger(request, env, origin: str) -> Response:
     # Parse body
     try:
@@ -253,33 +333,16 @@ async def _handle_pdf_merger(request, env, origin: str) -> Response:
             )
 
     print(f"[pdf-merger] calling external merge service for {len(object_keys)} files")
-    try:
-        ext_resp = await asyncio.wait_for(
-            js_fetch(
-                merge_url,
-                to_js(
-                    {
-                        "method": "POST",
-                        "headers": {"Content-Type": "application/json"},
-                        "body": json.dumps({"objectKeys": object_keys}),
-                    },
-                    dict_converter=Object.fromEntries,
-                ),
-            ),
-            timeout=merged_pdf_fetch_timeout_seconds,
-        )
-    except asyncio.TimeoutError:
-        return _error(
-            504,
-            f"Merge service request timed out after {merged_pdf_fetch_timeout_seconds}s.",
-            origin,
-        )
-    except Exception as exc:
-        return _error(502, f"Failed to call merge service: {exc}", origin)
+    ext_resp, call_error = await _call_merge_service_with_retry(
+        merge_url,
+        object_keys,
+        merged_pdf_fetch_timeout_seconds,
+    )
+    if ext_resp is None:
+        print(f"[pdf-merger] external service unavailable: {call_error}")
+        return _error(502, call_error, origin)
 
-    if not ext_resp.ok:
-        body_text = await ext_resp.text()
-        return _error(502, f"Merge service returned {ext_resp.status}: {body_text[:200]}", origin)
+    print(f"[pdf-merger] external response status: {ext_resp.status}")
 
     try:
         result_text = await ext_resp.text()
