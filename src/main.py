@@ -260,7 +260,7 @@ async def _call_merge_service_with_retry(
 
 async def _fetch_merge_with_timeout(
     merge_url: str,
-    object_keys: list,
+    body: dict,
     merged_pdf_fetch_timeout_seconds: float,
 ):
     controller = AbortController.new()
@@ -274,7 +274,7 @@ async def _fetch_merge_with_timeout(
                 {
                     "method": "POST",
                     "headers": {"Content-Type": "application/json"},
-                    "body": json.dumps({"objectKeys": object_keys}),
+                    "body": json.dumps(body),
                     "signal": controller.signal,
                 },
                 dict_converter=Object.fromEntries,
@@ -301,21 +301,6 @@ async def _handle_pdf_merger(request, env, origin: str) -> Response:
     if not isinstance(body, dict):
         return _error(400, "Request body must be a JSON object.", origin)
 
-    object_keys = body.get("objectKeys")
-    if object_keys is None:
-        object_keys = body.get("object_keys")
-
-    if object_keys is None:
-        return _error(400, "Missing required field: objectKeys.", origin)
-
-    if not isinstance(object_keys, list) or not object_keys:
-        return _error(400, "objectKeys must be a non-empty array.", origin)
-
-    if any(not isinstance(item, str) or not item.strip() for item in object_keys):
-        return _error(400, "objectKeys must contain non-empty strings.", origin)
-
-    print(f"[pdf-merger] received objectKeys: {object_keys}")
-
     merge_url = getattr(env, "SERVICE_PDF_MERGE_URL", None)
     if not merge_url:
         return _error(500, "Missing required environment variable: SERVICE_PDF_MERGE_URL.", origin)
@@ -332,10 +317,10 @@ async def _handle_pdf_merger(request, env, origin: str) -> Response:
                 "[pdf-merger] invalid MERGED_PDF_FETCH_TIMEOUT_SECONDS; using default"
             )
 
-    print(f"[pdf-merger] calling external merge service for {len(object_keys)} files")
+    print(f"[pdf-merger] calling external merge service with full request body")
     ext_resp, call_error = await _call_merge_service_with_retry(
         merge_url,
-        object_keys,
+        body,
         merged_pdf_fetch_timeout_seconds,
     )
     if ext_resp is None:
