@@ -347,6 +347,7 @@ async def _handle_pdf_merger(request, env, origin: str) -> Response:
 # ---------------------------------------------------------------------------
 async def _run_health_check(env):
     hello_url = getattr(env, "SERVICE_HELLO_URL", None)
+    print(f"[health-check] SERVICE_HELLO_URL resolved to: {hello_url!r}")
     if not hello_url:
         print("[health-check] SERVICE_HELLO_URL is not configured; skipping.")
         return
@@ -405,4 +406,4 @@ class Default(WorkerEntrypoint):
         return _error(404, "Not Found.", origin)
 
     async def scheduled(self, controller, env, ctx):
-        await _run_health_check(env)
+        await _run_health_check(self.env)
