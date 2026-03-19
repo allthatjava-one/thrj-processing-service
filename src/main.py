@@ -404,5 +404,5 @@ class Default(WorkerEntrypoint):
 
         return _error(404, "Not Found.", origin)
 
-    async def scheduled(self, controller):
-        await _run_health_check(self.env)
+    async def scheduled(self, controller, env, ctx):
+        await _run_health_check(env)
