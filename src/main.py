@@ -343,6 +343,21 @@ async def _handle_pdf_merger(request, env, origin: str) -> Response:
 
 
 # ---------------------------------------------------------------------------
+# Health-check (keep-alive ping)
+# ---------------------------------------------------------------------------
+async def _run_health_check(env):
+    hello_url = getattr(env, "SERVICE_HELLO_URL", None)
+    if not hello_url:
+        print("[health-check] SERVICE_HELLO_URL is not configured; skipping.")
+        return
+    try:
+        resp = await js_fetch(hello_url)
+        print(f"[health-check] GET {hello_url} → {resp.status}")
+    except Exception as exc:
+        print(f"[health-check] failed to ping {hello_url}: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Cloudflare Workers entry point
 # ---------------------------------------------------------------------------
 class Default(WorkerEntrypoint):
@@ -352,6 +367,14 @@ class Default(WorkerEntrypoint):
 
         raw = getattr(env, "ALLOWED_ORIGINS", "") or ""
         allowed_origins = [o.strip() for o in raw.split(",") if o.strip()]
+
+        # Scheduled-trigger shim: wrangler dev routes /__scheduled through on_fetch
+        # for Python workers instead of calling the scheduled handler directly.
+        # Next 4 lines are only for Development test. In production, scheduled handler is called directly by Cloudflare on schedule.
+        # path_early = urlparse(str(request.url)).path.rstrip("/")
+        # if path_early == "/__scheduled":
+        #     await _run_health_check(env)
+        #     return Response.new("ok", {"status": 200})
 
         # CORS preflight
         if method == "OPTIONS":
@@ -380,3 +403,6 @@ class Default(WorkerEntrypoint):
             return _error(405, "Method Not Allowed: use POST.", origin)
 
         return _error(404, "Not Found.", origin)
+
+    async def scheduled(self, controller):
+        await _run_health_check(self.env)

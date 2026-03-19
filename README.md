@@ -19,6 +19,12 @@ uv run pywrangler init
 wrangler dev --port 8788
 ```
 
+# Trigger the scheduled health-check job manually (local dev only)
+Cron triggers do not fire automatically in `wrangler dev`. Use this endpoint to invoke the job on demand:
+```
+curl "http://localhost:8788/__scheduled"
+```
+
 # Deploy to Cloudflare Pages
 Keep all variables as secret type
 ```
